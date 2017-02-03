@@ -1,62 +1,24 @@
 #!/usr/bin/env bash
 
-eval $(docker-machine env es-swarm-1)
+#docker service rm logstash elasticsearch proxy swarm-listener kibana
+#docker network rm elk proxy
+#docker service rm logstash redis proxy hello-service logspout kibana elasticsearch swarm-listener
 
-docker network create --driver overlay elk
+docker network rm elk proxy
+source conf/global.conf
+echo "-------------------------"
+echo "env:"$ENV"--NODE_COUNT:"$NODE_COUNT"--ELK_NODE_COUNT" $ELK_NODE_COUNT
+echo "-------------------------"
 
-docker service create --name elasticsearch \
-    --mode global \
-    --network elk \
-    -p 9200:9200 \
-    --constraint "node.labels.elk == yes" \
-    --reserve-memory 500m \
-    elasticsearch:2.4
+eval $(docker-machine env swarm-1)
 
-while true; do
-    REPLICAS=$(docker service ps elasticsearch | grep es-swarm-2 | awk '{print $7}')
-    echo "REPLICAS:"$REPLICAS
-    A=$(docker service ps elasticsearch | grep es-swarm-2 | awk '{print $0}')
-    echo $A
-    if [[ $REPLICAS == "Running" ]]; then
-        sleep 5
-        echo "elasticsearch Running..."
-        break
-    else
-        echo "Waiting for the elasticsearch service..."
-        sleep 5
-    fi
-done
+NODE_COUNT=$(docker node ls | grep -ic Active)
+echo "NODE_COUNT-"$NODE_COUNT
 
-mkdir -p docker/logstash
-cp conf/logstash.conf docker/logstash/logstash.conf
-scp -r docker root@xxx.xxx.xxx.xxx:/
-scp -r docker root@xxx.xxx.xxx.xxx:/
+docker network create --driver overlay --subnet=10.0.8.0/24 proxy
+docker network create --driver overlay --subnet=10.0.9.0/24 elk
 
-
-docker service create --name logstash \
-    --mount "type=bind,source=/docker/logstash,target=/conf" \
-    --mode global \
-    --network elk \
-    -e LOGSPOUT=ignore \
-    --reserve-memory 100m \
-    logstash:2.4 logstash -f /conf/logstash.conf
-
-while true; do
-    REPLICAS=$(docker service ps logstash | grep es-swarm-2 | awk '{print $7}')
-    echo "REPLICAS:"$REPLICAS
-     A=$(docker service ps logstash | grep es-swarm-2 | awk '{print $0}')
-    echo $A
-    if [[ $REPLICAS == "Running" ]]; then
-        sleep 5
-        echo "logstash Running..."
-        break
-    else
-        echo "Waiting for the logstash service..."
-        sleep 5
-    fi
-done
-
-docker network create --driver overlay proxy
+sleep 10
 
 docker service create --name swarm-listener \
     --network proxy \
@@ -73,6 +35,7 @@ docker service create --name proxy \
     -e MODE=swarm \
     -e LISTENER_ADDRESS=swarm-listener \
     vfarcic/docker-flow-proxy
+
 
 while true; do
     REPLICAS=$(docker service ls | grep swarm-listener | awk '{print $3}')
@@ -96,6 +59,90 @@ while true; do
     fi
 done
 
+
+docker service create --name elasticsearch \
+    --mode global \
+    --network elk \
+    -p 9200:9200 \
+    -e ES_JAVA_OPTS="-Dmapper.allow_dots_in_name=true" \
+    --constraint "node.labels.elk == yes" \
+    --reserve-memory 500m \
+    elasticsearch:2.4
+
+
+while true; do
+    REPLICAS=$(docker service ls | grep elasticsearch | awk '{print $3}')
+    REPLICAS_NEW=$(docker service ls | grep elasticsearch | awk '{print $4}')
+    if [[ $REPLICAS == $ELK_NODE_COUNT"/"$ELK_NODE_COUNT || $REPLICAS_NEW == $ELK_NODE_COUNT"/"$ELK_NODE_COUNT ]]; then
+        break
+    else
+        echo "Waiting for the elasticsearch service..."
+        sleep 5
+    fi
+done
+
+
+
+docker service create --name log-redis \
+--network elk \
+redis redis-server --requirepass redis
+
+while true; do
+    REPLICAS=$(docker service ls | grep log-redis | awk '{print $3}')
+    REPLICAS_NEW=$(docker service ls | grep log-redis | awk '{print $4}')
+    if [[ $REPLICAS == $LOG_REDIS_COUNT"/"$LOG_REDIS_COUNT || $REPLICAS_NEW == $LOG_REDIS_COUNT"/"$LOG_REDIS_COUNT ]]; then
+        break
+    else
+        echo "Waiting for the log-redis service..."
+        sleep 5
+    fi
+done
+
+
+mkdir -p docker/logstash
+cp conf/logstash.conf docker/logstash/logstash.conf
+
+LOGSTASH_SOURCE=""
+if [ "$ENV" = "remote" ]; then
+
+    echo "copy logstash conf..."
+
+    OLD_IFS="$IFS"
+    IFS=","
+    elk_nodes=($ELK_NODES_NUM)
+    IFS="$OLD_IFS"
+    for i in ${elk_nodes[@]}; do
+        scp -r docker root@$(docker-machine ip swarm-$i):/
+    done
+    echo "copy logstash conf finished..."
+
+    LOGSTASH_SOURCE="/docker/logstash" 
+else
+    LOGSTASH_SOURCE="$PWD/docker/logstash"
+fi
+
+
+docker service create --name logstash \
+    --mount "type=bind,source=$LOGSTASH_SOURCE,target=/conf" \
+    --mode global \
+    --network elk \
+    --constraint "node.labels.elk == yes" \
+    -e LOGSPOUT=ignore \
+    --reserve-memory 100m \
+    logstash:2.4 logstash -f /conf/logstash.conf
+
+
+while true; do
+    REPLICAS=$(docker service ls | grep logstash | awk '{print $3}')
+    REPLICAS_NEW=$(docker service ls | grep logstash | awk '{print $4}')
+    if [[ $REPLICAS == $ELK_NODE_COUNT"/"$ELK_NODE_COUNT || $REPLICAS_NEW == $ELK_NODE_COUNT"/"$ELK_NODE_COUNT ]]; then
+        break
+    else
+        echo "Waiting for the logstash service..."
+        sleep 5
+    fi
+done
+
 docker service create --name kibana \
     --network elk \
     --network proxy \
@@ -108,12 +155,32 @@ docker service create --name kibana \
     kibana:4.6
 
 while true; do
-    REPLICAS=$(docker service ls | grep proxy | awk '{print $3}')
-    REPLICAS_NEW=$(docker service ls | grep proxy | awk '{print $4}')
+    REPLICAS=$(docker service ls | grep kibana | awk '{print $3}')
+    REPLICAS_NEW=$(docker service ls | grep kibana | awk '{print $4}')
     if [[ $REPLICAS == "1/1" || $REPLICAS_NEW == "1/1" ]]; then
         break
     else
-        echo "Waiting for the proxy service..."
+        echo "Waiting for the kibana service..."
+        sleep 5
+    fi
+done
+
+
+docker service create --name logspout \
+    --network elk \
+    --mode global \
+    -e DEBUG=true \
+    --mount "type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock" \
+    rtoma/logspout-redis-logstash redis://log-redis?password=redis
+
+
+while true; do
+    REPLICAS=$(docker service ls | grep logspout | awk '{print $3}')
+    REPLICAS_NEW=$(docker service ls | grep logspout | awk '{print $4}')
+    if [[ $REPLICAS == $NODE_COUNT"/"$NODE_COUNT || $REPLICAS_NEW == $NODE_COUNT"/"$NODE_COUNT ]]; then
+        break
+    else
+        echo "Waiting for the logspout service..."
         sleep 5
     fi
 done
@@ -121,5 +188,3 @@ done
 echo ""
 echo ">> The services are up and running inside the swarm cluster"
 echo ""
-
-## open http://$(docker-machine ip es-swarm-1)/app/kibana
