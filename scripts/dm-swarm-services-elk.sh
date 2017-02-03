@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
 
-#docker service rm logstash elasticsearch proxy swarm-listener kibana
-#docker network rm elk proxy
-#docker service rm logstash redis proxy hello-service logspout kibana elasticsearch swarm-listener
-
 docker network rm elk proxy
 source conf/global.conf
 echo "-------------------------"
